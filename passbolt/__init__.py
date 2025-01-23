@@ -54,7 +54,7 @@ class PassboltAPI:
         self.me_url = f"{self.base_url}/users/me.json"
         self.groups_url = f"{self.base_url}/groups.json"
         self.verify = self.config.get("verify", True)
-        self.timeout = self.config.get("timeout", "")
+        self.timeout = self.config.get("timeout", 5.0)
 
         # vars definition
         self.authenticated = False
