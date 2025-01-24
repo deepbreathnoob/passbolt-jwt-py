@@ -54,7 +54,7 @@ class PassboltAPI:
         self.me_url = f"{self.base_url}/users/me.json"
         self.groups_url = f"{self.base_url}/groups.json"
         self.verify = self.config.get("verify", True)
-        self.timeout = self.config.get("timeout", 5.0)
+        self.timeout = float(self.config.get("timeout", 5.0))
 
         # vars definition
         self.authenticated = False
@@ -88,7 +88,7 @@ class PassboltAPI:
                 "passphrase": os.environ.get("PASSBOLT_PASSPHRASE", "undefined"),
                 "fingerprint": os.environ.get("PASSBOLT_FINGERPRINT", "undefined"),
                 "verify": os.environ.get("PASSBOLT_VERIFY", True),
-                "timeout": float(os.environ.get("PASSBOLT_TIMEOUT", 5.0)),
+                "timeout": os.environ.get("PASSBOLT_TIMEOUT", 5.0),
             }
 
     def stage1(self):
