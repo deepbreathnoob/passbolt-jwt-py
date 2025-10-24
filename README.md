@@ -21,9 +21,7 @@ This project is a Python client implementation for interacting with the [Passbol
 
 ## Installation
 
-```sh
-pip install passbolt-py
-```
+- Clone repository
 
 ## Configuration
 
@@ -46,7 +44,7 @@ export PASSBOLT_USER_ID=<user_id>
 ### Initializing the client
 
 ```python
-from passbolt import PassboltAPI
+from passbolt.passbolt_jwt_py import PassboltAPI
 
 # Initialization with configuration
 config = {
