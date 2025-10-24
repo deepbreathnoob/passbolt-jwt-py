@@ -1,4 +1,4 @@
-#!/tools/python/python
+#!/usr/bin/python
 # coding: utf-8
 # pyright: reportMissingImports=false
 # pyright: reportOptionalOperand=false
