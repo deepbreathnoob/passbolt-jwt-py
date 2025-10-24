@@ -6,9 +6,10 @@ This project is a Python client implementation for interacting with the [Passbol
 
 ## Features
 
-- Authentication with a GPG key
+- Authentication with a GPG key, utilized JTW.
 - Retrieve users and groups
-- Create groups and manage users
+- Creating users
+- Create and delete groups, manage users
 - Encrypt and decrypt messages using GPG
 - Retrieve and manage Passbolt resources
 
@@ -30,13 +31,14 @@ Configuration can be loaded from a dictionary or environment variables:
 
 ```sh
 export PASSBOLT_GPG_BINARY=gpg
-export PASSBOLT_GPG_LIBRARY=PGPy
-export PASSBOLT_BASE_URL=https://your-passbolt-instance.com
-export PASSBOLT_PRIVATE_KEY='your-private-key'
-export PASSBOLT_PASSPHRASE='your-passphrase'
-export PASSBOLT_FINGERPRINT='your-key-fingerprint'
-export PASSBOLT_VERIFY=True
+export PASSBOLT_GPG_LIBRARY=gnupg
+export PASSBOLT_BASE_URL=https://passbolt.local
+export PASSBOLT_PRIVATE_KEY=<passbolt_private_key>
+export PASSBOLT_PASSPHRASE=<passphrase>
+export PASSBOLT_VERIFY=False
 export PASSBOLT_TIMEOUT=5.0
+export PASSBOLT_USER_ID=<user_id>
+
 ```
 
 ## Usage
@@ -49,14 +51,15 @@ from passbolt import PassboltAPI
 # Initialization with configuration
 config = {
     "gpg_binary": "gpg",
-    "gpg_library": "PGPy",
+    "gpg_library": "gnupg",
     "base_url": "https://your-passbolt-instance.com",
     "private_key": "your-private-key",
     "passphrase": "your-passphrase",
-    "fingerprint": "your-key-fingerprint",
     "verify": True,
     "timeout": 5.0,
+    "user_id": "USER-ID-get-it-from-you-passbolt-instance",
 }
+
 
 client = PassboltAPI(dict_config=config)
 ```
@@ -102,4 +105,4 @@ Contributions are welcome. Please follow best development practices and submit a
 
 ## License
 
-This project is licensed under the MIT License.
+This project is licensed under the MIT-0 License.
