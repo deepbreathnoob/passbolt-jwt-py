@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+#!/tools/python/python
 # coding: utf-8
 # pyright: reportMissingImports=false
 # pyright: reportOptionalOperand=false
@@ -11,13 +11,11 @@
 
 import json
 import os
-import re
 import warnings
-from pprint import pprint
-from urllib.parse import unquote
-
+from datetime import datetime, timedelta
+import uuid
 import gnupg
-import httpx
+import requests
 from pgpy import PGPKey, PGPMessage
 
 warnings.filterwarnings(
@@ -42,13 +40,23 @@ class PassboltAPI:
         )
 
         # Load key
+        self.passphrase = str(self.config.get("passphrase", None))
+        self.base_url = self.config.get("base_url")
+        self.user_id = self.config.get("user_id")
         if self.config.get("gpg_library", "PGPy") == "gnupg":
             self.gpg = gnupg.GPG(gpgbinary=self.config.get("gpgbinary", "gpg"))
-            self.fingerprint = self.config.get("fingerprint", "")
+            self.key = self.gpg.import_keys(key_data=self.config.get('private_key'), passphrase=self.passphrase)
+            self.fingerprint = self.key.fingerprints[0].replace(" ", "")
+            self.server_pub_key = self.gpg.import_keys(self.get_verify(self.base_url))
+            self.server_pub_fingerprint = self.server_pub_key.fingerprints[0].replace(" ", "")
         else:
             self.key, _ = PGPKey.from_blob(self.config.get("private_key"))
             self.fingerprint = self.key.fingerprint.replace(" ", "")
-        self.base_url = self.config.get("base_url")
+            self.server_pub_key = self.gpg.import_keys(self.get_verify(self.base_url))
+            self.server_pub_fingerprint = self.server_pub_key.fingerprints[0].replace(" ", "")
+
+
+
         self.login_url = f"{self.base_url}/auth/login.json"
         self.users_url = f"{self.base_url}/users.json"
         self.me_url = f"{self.base_url}/users/me.json"
@@ -58,15 +66,14 @@ class PassboltAPI:
 
         # vars definition
         self.authenticated = False
-        self.token = None
-        self.user_id = None
+
         self.pgp_message = None
-        self.nonce = None
+        self.jwt_token = None
 
-        self.session = httpx.Client(verify=self.verify, timeout=self.timeout)
-        self.cookies = httpx.Cookies()
 
-        self.login()
+
+        self.jwt_token = self.get_jwt_token(base_url=self.base_url, user_id=self.user_id, passphrase=self.passphrase)
+        print("Test")
 
         # resource types
         self.resource_types = self.get_resource_type_ids()
@@ -90,23 +97,6 @@ class PassboltAPI:
                 "verify": os.environ.get("PASSBOLT_VERIFY", True),
                 "timeout": os.environ.get("PASSBOLT_TIMEOUT", 5.0),
             }
-
-    def stage1(self):
-        """Stage 1"""
-
-        post = {"data": {"gpg_auth": {"keyid": self.fingerprint}}}
-
-        response = self.session.post(self.login_url, json=post)
-        decoded_response = json.loads(response.text)
-
-        if decoded_response["header"]["code"] == 200:
-            pgp_message = unquote(
-                response.headers.get("x-gpgauth-user-auth-token")
-            ).replace("\\+", " ")
-            return pgp_message
-
-        pprint(decoded_response)
-        return None
 
     def decrypt(self, message):
         """Decrypt"""
@@ -148,74 +138,80 @@ class PassboltAPI:
             pgp_message |= self.key.sign(pgp_message)
         return str(pubkey.encrypt(pgp_message))
 
-    def stage2(self, nonce):
-        """Stage 2"""
+    def get_jwt_token(self, base_url: str, user_id: str, passphrase: str) -> requests.Response:
+        """Authenticate against Passbolt by exchanging a signed JWT challenge.
 
-        post = {
-            "data": {
-                "gpg_auth": {"keyid": self.fingerprint, "user_token_result": nonce}
-            }
+        :param base_url: Base URL of the Passbolt instance.
+        :param user_id: UUID assigned to the Passbolt user.
+        :param passphrase: Passphrase protecting the private key.
+        :returns: HTTP response object returned by the JWT login endpoint.
+        :raises RuntimeError: If the GPG encryption step fails.
+        """
+        json_payload = {
+            "version": "1.0.0",
+            "domain": base_url,
+            "verify_token": str(uuid.uuid4()),
+            "verify_token_expiry": int((datetime.now() + timedelta(minutes=2)).timestamp()),
         }
 
-        response = self.session.post(self.login_url, json=post)
-        decoded_response = json.loads(response.text)
+        encrypted_data = self.gpg.encrypt(
+            json.dumps(json_payload),
+            recipients=[self.server_pub_fingerprint],
+            sign=self.fingerprint,
+            always_trust=True,
+            passphrase=self.passphrase,
+        )
 
-        if decoded_response["header"]["code"] == 200:
-            return True
+        if not encrypted_data.ok:
+            raise RuntimeError(f"Encryption failed: {encrypted_data.status}")
 
-        return False
+        url = f"{base_url}/auth/jwt/login.json"
+        payload = {
+            "user_id": user_id,
+            "challenge": str(encrypted_data),
+        }
 
-    def get_token(self, cookie):
-        """Get Token"""
+        response = requests.post(url, json=payload, verify=False)
+        data = json.loads(response.text)
+        if(data['header']['code'] == 200):
+            decrypted_challange = self.gpg.decrypt(data["body"]["challenge"])
+            self.authenticated = True
 
-        pattern = r"csrfToken=([^;]+)"
-        match = re.search(pattern, cookie)
-        if match is not None:
-            return match.group(1)
-
-        return match
-
-    def get_cookie(self):
-        """Get Cookie"""
-
-        response = self.session.get(self.me_url)
-        cookie = response.headers.get("set-cookie")
-        user_id = json.loads(response.text)
-        self.user_id = user_id["body"]["id"]
-        self.token = self.get_token(cookie)
-        self.session.headers = {"X-CSRF-Token": self.token}
-
-    def check_login(self):
-        """Check Login"""
-
-        response = self.session.get(self.base_url + "/")
-        if response.status_code != 200:
-            print("Falha no login")
-            print(response)
-
-    def login(self):
-        """Login"""
-
-        self.pgp_message = self.stage1()
-        if self.config.get("gpg_library", "PGPy") == "gnupg":
-            self.nonce = self.decrypt(self.pgp_message)
+            return json.loads(decrypted_challange.data)
         else:
-            self.nonce = self.decrypt(self.pgp_message).decode()
-        self.authenticated = self.stage2(str(self.nonce))
-        self.get_cookie()
-        self.check_login()
+            return None
+
+    def get_verify(self, domain: str) -> str:
+        """Retrieve the verification key block from the Passbolt server.
+
+        :param domain: Base URL of the Passbolt instance.
+        :returns: Armored public key block as a string.
+        :raises requests.HTTPError: If the verification endpoint returns an error.
+        """
+        url = f"{domain}/auth/verify.json"
+        response = requests.get(url, verify=False)
+        response.raise_for_status()
+        return json.loads(response.text)["body"]["keydata"]
 
     def get_users(self):
         """Get Users"""
 
-        response = self.session.get(self.users_url)
+        response = requests.get(
+            url=self.users_url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+            )
         decoded_response = json.loads(response.text)
         return decoded_response["body"]
 
     def get_groups(self):
         """Get Groups"""
 
-        response = self.session.get(self.groups_url)
+        response = requests.get(
+            url=self.groups_url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
         decoded_response = json.loads(response.text)
         return decoded_response["body"]
 
@@ -256,7 +252,29 @@ class PassboltAPI:
             "groups_users": [{"user_id": self.user_id, "is_admin": True}],
         }
 
-        response = self.session.post(self.groups_url, json=post)
+        response = requests.post(
+            url=self.groups_url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+            json=post
+        )
+
+        return response
+
+    def remove_group(self, group_name):
+        """Remove Group"""
+
+        post = {
+            "name": group_name,
+            "groups_users": [{"user_id": self.user_id, "is_admin": True}],
+        }
+
+        response = requests.delete(
+            url=self.groups_url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+            json=post
+        )
 
         return response
 
@@ -268,7 +286,12 @@ class PassboltAPI:
             "groups_users": [{"user_id": user_id, "is_admin": admin}],
         }
         url = f"{self.base_url}/groups/{group_id}/dry-run.json"
-        response = self.session.put(url, json=post)
+        response = requests.put(
+            url=url,
+            json=post,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
         if response.status_code == 200:
             user_key = self.get_user_public_key(user_id)
             secrets = json.loads(response.text)["body"]["dry-run"]["Secrets"]
@@ -293,11 +316,71 @@ class PassboltAPI:
             }
 
             url = f"{self.base_url}/groups/{group_id}.json"
-            response = self.session.put(url, json=post)
+            response = requests.put(
+                url=url,
+                json=post,
+                headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+                verify=False,
+            )
         else:
             print(response.headers)
             print()
             print(response.text)
+            print()
+
+        return response
+
+    def remove_user_from_group(self, user_id, group_id):
+        """Remove User from Group"""
+        user_to_delete =self.get_user_by_id(user_id=user_id)
+        for group in user_to_delete['groups_users']:
+            if(group['group_id'] == group_id):
+                groups_users_relationship_uuid = group['id']
+        post = {
+            "id": group_id,
+            "groups_users": [{"id": groups_users_relationship_uuid, "delete": True}],
+        }
+        url = f"{self.base_url}/groups/{group_id}/dry-run.json"
+        responde_dry_run = requests.put(
+            url=url,
+            json=post,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
+        if responde_dry_run.status_code == 200:
+            user_key = self.get_user_public_key(user_id)
+            secrets = json.loads(responde_dry_run.text)["body"]["dry-run"]["Secrets"]
+
+            secrets_list = []
+            for secret in secrets:
+                decrypted = self.decrypt(secret["Secret"][0]["data"])
+                reencrypted = self.encrypt(str(decrypted), user_key)
+
+                secrets_list.append(
+                    {
+                        "resource_id": secret["Secret"][0]["resource_id"],
+                        "user_id": user_id,
+                        "data": str(reencrypted),
+                    }
+                )
+
+            post = {
+                "id": group_id,
+                "groups_users": [{"id": groups_users_relationship_uuid, "delete": True}]
+
+            }
+
+            url = f"{self.base_url}/groups/{group_id}.json"
+            response = requests.put(
+                url=url,
+                json=post,
+                headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+                verify=False,
+            )
+        else:
+            print(responde_dry_run.headers)
+            print()
+            print(responde_dry_run.text)
             print()
 
         return response
@@ -332,10 +415,20 @@ class PassboltAPI:
             "groups_users": [{"id": group_user_id, "is_admin": True}],
         }
         url = f"{self.base_url}/groups/{group_id}/dry-run.json"
-        response = self.session.put(url, json=post)
+        response = requests.put(
+            url=url,
+            json=post,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
         if response.status_code == 200:
             url = f"{self.base_url}/groups/{group_id}.json"
-            response = self.session.put(url, json=post)
+            response = requests.put(
+                url=url,
+                json=post,
+                headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+                verify=False,
+            )
         else:
             print(response.headers)
             print()
@@ -373,7 +466,11 @@ class PassboltAPI:
         """
 
         url = f"{self.base_url}/users/{user_id}.json"
-        response = self.session.get(url)
+        response = requests.get(
+            url=url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
 
         user = json.loads(response.text)["body"]
         return user["gpgkey"]
@@ -382,7 +479,11 @@ class PassboltAPI:
         """Get Resource Secret"""
 
         url = f"{self.base_url}/secrets/resource/{resource_id}.json"
-        response = self.session.get(url)
+        response = requests.get(
+            url=url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
 
         secrete_data = json.loads(response.text)["body"]["data"]
         return secrete_data
@@ -391,7 +492,11 @@ class PassboltAPI:
         """Get Resources"""
 
         url = f"{self.base_url}/resources.json"
-        response = self.session.get(url)
+        response = requests.get(
+            url=url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
 
         secrete_data = json.loads(response.text)["body"]
         return secrete_data
@@ -400,7 +505,11 @@ class PassboltAPI:
         """Get Resource Per UUID"""
 
         url = f"{self.base_url}/resources/{uuid}.json"
-        response = self.session.get(url)
+        response = requests.get(
+            url=url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
 
         secrete_data = json.loads(response.text)["body"]
         return secrete_data
@@ -408,7 +517,12 @@ class PassboltAPI:
     def create_resource(self, resource):
         """Create Resource"""
 
-        return self.session.post(f"{self.base_url}/resources.json", json=resource)
+        return requests.post(
+            url=f"{self.base_url}/resources.json",
+            json=resource,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
 
     def get_resource_types(self):
         """
@@ -420,7 +534,11 @@ class PassboltAPI:
         :rtype: dict
         """
 
-        response = self.session.get(f"{self.base_url}/resource-types.json")
+        response = requests.get(
+            url=f"{self.base_url}/resource-types.json",
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
+            verify=False,
+        )
         decoded_response = json.loads(response.text)
         return decoded_response["body"]
 
@@ -431,3 +549,24 @@ class PassboltAPI:
         for item in self.get_resource_types():
             res[item[per]] = item["id"]
         return res
+
+    def create_user(self, username: str, first_name: str, last_name: str):
+        """Create a new Passbolt user with the provided profile details."""
+        payload = {
+            "username": username,
+            "profile": {
+                "first_name": first_name,
+                "last_name": last_name,
+            },
+        }
+        response = requests.post(
+            self.users_url,
+            headers={"Authorization": f"Bearer {self.jwt_token['access_token']}"},
+            json=payload,
+            verify=False,
+        )
+        response.raise_for_status()
+        return response.json()
+
+
+
