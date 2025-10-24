@@ -263,17 +263,12 @@ class PassboltAPI:
 
     def remove_group(self, group_name):
         """Remove Group"""
-
-        post = {
-            "name": group_name,
-            "groups_users": [{"user_id": self.user_id, "is_admin": True}],
-        }
-
+        group = self.get_group_by_name(group_name)
+        url = f"{self.base_url}/groups/{group.get('id')}.json"
         response = requests.delete(
-            url=self.groups_url,
+            url=url,
             headers={"Authorization": f"Bearer {self.jwt_token['access_token']}", },
             verify=False,
-            json=post
         )
 
         return response
